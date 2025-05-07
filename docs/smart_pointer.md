@@ -582,22 +582,198 @@ fn process<'a>(input: Cow<'a, str>) {
     无需重复代码，支持更灵活的输入类型
     提高了代码的可读性和可维护性
 
-## 五 智能指针遇到的挑战(Challenges and Pitfalls of Smart Pointer)
-### 5.1 循环引用(Reference Cycles)
+## 五 Pin<T> 智能指针
+### 5.1 为什么需要Pin<T>
+背景: 当数据存储在栈上，所有权转移会将整个值复制到新变量的栈位置，而不是简单地移动指针。这种行为可能导致地址变化  
+```rust
+fn main() {
+    let a = Data { value: 42 }; // 栈上分配
+    println!("Address of a: {:p}", &a);
+
+    let b = a; // 所有权转移
+    println!("Address of b: {:p}", &b);
+}
+```
+Address of a: 0x16f532e2c  
+Address of b: 0x16f532e8c  
+
+背景: 当数据存储在堆上（如通过 Box），所有权转移时，仅指针的所有权发生变化，堆上的数据地址不变
+```rust
+fn main() {
+    // 当数据存储在堆上（如通过 Box），所有权转移时，仅指针的所有权发生变化，堆上的数据地址不变
+    let x = Box::new(42);
+    println!("Address of x on stack: {:p}", &x); // 栈上变量 x 的地址
+    println!("Address of x on heap: {:p}", x.as_ref()); // 堆上数据地址
+
+    // 转移所有权
+    let y = x;
+    println!("Address of y on stack: {:p}", &y); // 栈上变量 y 的地址
+}
+```
+Address of x on stack: 0x16fa82d68  
+Address of x on heap: 0x60000133c020  
+Address of y on stack: 0x16fa82e28  
+Address of y on heap: 0x60000133c020  
+
+针对于某些在栈上分配的包含自身引用的变量，当进行所有权转移之后，会发生拷贝，从一个地址转到另一个地址，但是自身引用的地址指向的还是之前那个引用，但是那个内存已经不存在了。  
+
+
+### 5.2 什么是Pin<T>
+由于所有权发生了转移，可能会导致在栈上分配的内存地址发生变化。而使用 Pin 表示一个值不能被移动，内存地址固定
+Pin 禁止通过普通的 &mut T 来移动值  
+可以通过 unsafe 手动解除限制，但需要开发者确保安全性  
+如果一个类型实现了 Unpin，它可以安全地移动，Pin 对它不起限制作用；如果类型未实现 Unpin（如 Future），Pin 会禁止它被移动  
+Pin<P<T>>： 是否可以钉在原来的位置，而是否可以钉住，取决于T是否实现了Unpin, 就不能钉住 编译器默认会给所有的类型实现一个Unpin
+
+异步编程中的状态机通常包含一些可能引用自身的状态。如果状态机被移动，它的指针可能失效，从而导致未定义行为。Pin是一个核心工具，用于保证在堆上固定一个值的位置，防止它在内存中移动
+
+为什么 Pin 重要？
+避免移动自引用数据：
+如果一个结构体包含指向自己内部字段的指针（即自引用），移动该结构体会导致指针失效。Pin通过将值“固定”在内存中，防止这种移动，从而避免潜在的未定义行为。
+```rust
+use std::pin::Pin;
+
+struct SelfReferential {
+    data: String,
+    data_ref: Option<*const String>, // 持有一个自引用指针
+}
+
+impl SelfReferential {
+    fn new(data: String) -> Self {
+        Self {
+            data,
+            data_ref: None,
+        }
+    }
+
+    fn init_ref(&mut self) {
+        // 指针指向自身数据
+        self.data_ref = Some(&self.data as *const String);
+    }
+}
+
+fn main() {
+    let mut instance = SelfReferential::new(String::from("hello"));
+
+    instance.init_ref(); // 初始化自引用指针
+    // 如果我们在这里移动 `instance`，`data_ref` 会变成悬空指针
+
+    println!("Data: {}", unsafe { &*instance.data_ref.unwrap() }); // 安全访问
+}
+
+```
+
+问题： 如果将instance移动到另一个位置，data_ref将指向一个无效地址。
+解决方法： 使用 Pin 固定位置，防止移动。
+```rust
+use std::pin::Pin;
+
+struct SelfReferential {
+    data: String,
+    data_ref: Option<*const String>, // 持有一个自引用指针
+}
+
+impl SelfReferential {
+    fn new(data: String) -> Self {
+        Self {
+            data,
+            data_ref: None,
+        }
+    }
+
+    fn init_ref(self: Pin<&mut Self>) {
+        // 使用 `Pin` 来确保内存地址不变
+        let self_ptr = &self.data as *const String;
+        unsafe {
+            self.get_unchecked_mut().data_ref = Some(self_ptr);
+        }
+    }
+}
+
+fn main() {
+    let mut instance = SelfReferential::new(String::from("hello"));
+
+    // 使用 `Pin` 固定结构体的位置
+    let mut pinned_instance = Box::pin(instance);
+
+    // 安全初始化自引用
+    pinned_instance.as_mut().init_ref();
+
+    println!("Data: {}", unsafe { &*pinned_instance.data_ref.unwrap() });
+}
+```
+
+与 Future 的关系：
+异步任务的状态机可能包含自引用。例如，某些Future在执行期间可能持有对自身数据的引用。通过Pin，可以确保这些Future在内存中固定，不会被移动，从而保持内部指针有效。
+
+Pin 的主要场景
+异步任务：
+确保Future在执行过程中不会被移动。
+实现自定义的 Future：
+如果一个 Future 持有自引用数据，必须使用 Pin 来保护它   
+```rust
+use std::pin::Pin;
+use std::future::Future;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+struct TimerFuture {
+    when: Instant,
+}
+
+impl TimerFuture {
+    fn new(duration: Duration) -> Self {
+        TimerFuture {
+            when: Instant::now() + duration,
+        }
+    }
+}
+
+impl Future for TimerFuture {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if Instant::now() >= self.when {
+            Poll::Ready(()) // 定时器完成
+        } else {
+            cx.waker().wake_by_ref(); // 注册任务以便稍后唤醒
+            Poll::Pending // 定时器未完成
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let timer = TimerFuture::new(Duration::from_secs(2));
+    timer.await; // 等待定时器完成
+    println!("Timer done!");
+}
+
+```
+与异步执行器交互：
+异步执行器会通过 Pin 接口调用任务，确保任务安全地驻留在内存中
+
+
+## 六 智能指针遇到的挑战(Challenges and Pitfalls of Smart Pointer)
+### 6.1 循环引用(Reference Cycles)
 Rc<T> 和 RefCell<T> 的组合可能导致引用循环，无法释放内存
 解决方案：使用 Weak<T> 打破循环
 
 Combining Rc<T> and RefCell<T> can lead to reference cycles, preventing memory deallocation.
 Solution: Use Weak<T> to break the cycle
 
-### 5.2 运行时借用检查的开销(Runtime Borrow Checking Overhead)
+### 6.2 运行时借用检查的开销(Runtime Borrow Checking Overhead)
 RefCell<T> 在运行时检查借用，可能带来性能开销
 RefCell<T> introduces runtime borrow checking, which may impact performance
 
-### 5.3 多线程数据共享的锁竞争(Lock Contention in Multithreaded Scenarios)
+### 6.3 多线程数据共享的锁竞争(Lock Contention in Multithreaded Scenarios)
 使用 Mutex<T> 时需要小心锁竞争
 Using Mutex<T> requires careful handling to avoid lock contention
 
-### 5.4 逻辑复杂性增加(Increased Logical Complexity)
+### 6.4 逻辑复杂性增加(Increased Logical Complexity)
 过度使用智能指针可能使代码难以维护和理解
 Overusing smart pointers can make code harder to maintain and understand
+
+
+

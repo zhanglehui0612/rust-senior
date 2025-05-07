@@ -109,6 +109,7 @@ Rust prevents simultaneous mutable and immutable borrowing within the same scope
 fn main() {
     let mut msg = String::from("Hello");
     let r1 = &msg; // Immutable borrow
+    // lifecycle is not end
     let r2 = &mut msg; // ❌ Error: Cannot borrow as mutable while immutable borrow exists
     println!("{}, {}", r1, r2);
 }
@@ -122,7 +123,7 @@ fn main() {
     // Immutable borrow
     let r1 = &msg;
     println!("Read-only: {}", r1);
-
+    // it means lifecycle is end while has invoked println! function
     // Mutable borrow
     let r2 = &mut msg;
     r2.push_str(", Rust!");
@@ -373,7 +374,7 @@ fn main() {
     // 既然b被冻结了，这里为什么不会报错？
     println!("{b:?}");
 }
-```
+``` 
 既然b被冻结了，这里为什么不会报错？  
 因为b虽然被冻结了，但是编译器会推断，后续没有使用c, 那么c的借用生命周期到此结束了，c生命周期结束，b就恢复了，因此可以使用
 

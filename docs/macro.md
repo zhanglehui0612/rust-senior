@@ -233,3 +233,15 @@ syn = "1.0"        # 解析输入的 TokenStream
 quote = "1.0"      # 生成输出的 TokenStream
 proc-macro2 = "1.0" # 提供对 TokenStream 的更细粒度控制
 ```
+
+
+## 6 常见的宏
+### 6.1 derive
+在 Rust 里面，#[derive(...)] 是自动给结构体、枚举生成常用 trait 实现的语法糖,比如
+```rust
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct ListNode {
+    pub val: i32,
+    pub next: Option<Box<ListNode>>
+}
+```

@@ -3,7 +3,7 @@
 u8 、u16 、u32 、u64、 u128、 usize
 ### 1.2 有符号
 i8 、i16 、i32 、i64、 i128、 isize
-
+如果没有显式指定数据类型，整数类型是i32
 ```rust
 fn main() {
     // addition
